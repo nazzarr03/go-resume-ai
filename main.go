@@ -74,7 +74,6 @@ func analyzeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Prompta frontend yapısına birebir uygun JSON isteniyor
 	prompt := fmt.Sprintf(`
 Aşağıdaki açıklamayı analiz et ve sadece şu JSON yapısına birebir uygun şekilde dön (geçerli JSON üret):
 
