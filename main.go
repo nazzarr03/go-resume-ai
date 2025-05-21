@@ -116,12 +116,13 @@ Aşağıdaki açıklamayı analiz et ve sadece şu JSON yapısına birebir uygun
     {
       "title": "",
       "description": "",
-      "technologiesUsed": "",
+      "technologiesUsed": [],
       "githubLink": ""
     }
   ],
   "languages": [{ "name": "" }],
-  "interests": [{ "name": "" }]
+  "interests": [{ "name": "" }],
+  "achievements": [{ "title": "", "year": "", "extraInformation": "" }]
 }
 
 Sadece geçerli JSON üret ve başka hiçbir şey yazma. Açıklama: %s
@@ -164,12 +165,40 @@ Sadece geçerli JSON üret ve başka hiçbir şey yazma. Açıklama: %s
 	}
 
 	responseContent := openRouterResp.Choices[0].Message.Content
+	fmt.Println(">> Modelden gelen yanıt:\n", responseContent)
 
 	// Doğrudan frontend'e uygun JSON'u döndür
 	var parsedContent map[string]interface{}
 	if err := json.Unmarshal([]byte(responseContent), &parsedContent); err != nil {
 		http.Error(w, "ChatGPT çıktısı geçersiz JSON", http.StatusInternalServerError)
 		return
+	}
+
+	projects, ok := parsedContent["projects"].([]interface{})
+	if ok {
+		for _, p := range projects {
+			projMap, ok := p.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			techUsed, exists := projMap["technologiesUsed"]
+			if !exists {
+				continue
+			}
+			switch v := techUsed.(type) {
+			case string:
+				parts := strings.Split(v, ",")
+				arr := []string{}
+				for _, part := range parts {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" {
+						arr = append(arr, trimmed)
+					}
+				}
+				projMap["technologiesUsed"] = arr
+			case []interface{}:
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
