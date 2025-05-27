@@ -3,13 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 
+	"io"
+	"net/http"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/joho/godotenv"
+	"github.com/nazzarr03/go-resume-ai/db"
+	"github.com/nazzarr03/go-resume-ai/internal/auth"
+	"github.com/nazzarr03/go-resume-ai/internal/user"
+	"github.com/nazzarr03/go-resume-ai/pkg/middleware"
 )
 
 const openRouterURL = "https://openrouter.ai/api/v1/chat/completions"
@@ -34,47 +41,64 @@ type RequestBody struct {
 	UserDescription string `json:"userDescription"`
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file")
+	}
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
-			return
+	db.Connect()
+	database := db.DB
+
+	userRepository := user.NewUserRepository(database)
+	userService := user.NewUserService(userRepository)
+	userHandler := user.NewUserHandler(userService)
+
+	authRepository := auth.NewAuthRepository(database)
+	authService := auth.NewAuthService(authRepository, userRepository)
+	authHandler := auth.NewAuthHandler(authService)
+
+	app := fiber.New()
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     "http://localhost:5173",
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders:     "Content-Type, Authorization",
+		AllowCredentials: true,
+	}))
+
+	app.Get("/ping", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"message": "pong"})
+	})
+
+	app.Post("/login", authHandler.Login)
+	app.Post("/register", authHandler.Register)
+
+	api := app.Group("/users", middleware.AuthMiddleware)
+	api.Get("/", userHandler.GetUsers)
+	api.Get("/:id", userHandler.GetUserByID)
+	api.Post("/", userHandler.CreateUser)
+	api.Put("/:id", userHandler.UpdateUser)
+	api.Delete("/:id", userHandler.DeleteUser)
+	api.Get("/email/:email", userHandler.GetUserByEmail)
+	api.Get("/name/:username", userHandler.GetUserByUsername)
+
+	api.Post("/analyze", func(c *fiber.Ctx) error {
+		var reqBody RequestBody
+		if err := c.BodyParser(&reqBody); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Geçersiz JSON"})
 		}
 
-		next.ServeHTTP(w, r)
-	})
-}
+		text := strings.TrimSpace(reqBody.UserDescription)
+		if text == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Boş açıklama gönderilemez"})
+		}
 
-func analyzeHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "Sadece POST istekleri kabul edilir", http.StatusMethodNotAllowed)
-		return
-	}
+		apiKey := os.Getenv("OPENROUTER_API_KEY")
+		if apiKey == "" {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API anahtarı tanımsız"})
+		}
 
-	var reqBody RequestBody
-	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-		http.Error(w, "Geçersiz JSON formatı", http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	text := strings.TrimSpace(reqBody.UserDescription)
-	if len(text) == 0 {
-		http.Error(w, "Boş metin gönderilemez", http.StatusBadRequest)
-		return
-	}
-
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		http.Error(w, "API anahtarı eksik", http.StatusInternalServerError)
-		return
-	}
-
-	prompt := fmt.Sprintf(`
+		prompt := fmt.Sprintf(`
 Aşağıdaki açıklamayı analiz et ve sadece şu JSON yapısına birebir uygun şekilde dön (geçerli JSON üret):
 
 {
@@ -127,91 +151,68 @@ Aşağıdaki açıklamayı analiz et ve sadece şu JSON yapısına birebir uygun
 Sadece geçerli JSON üret ve başka hiçbir şey yazma. Açıklama: %s
 `, text)
 
-	// OpenRouter API isteği
-	reqPayload := OpenRouterRequest{
-		Model: "gpt-3.5-turbo",
-		Messages: []ChatMessage{
-			{
-				Role:    "user",
-				Content: prompt,
+		// OpenRouter API isteği
+		reqPayload := OpenRouterRequest{
+			Model: "gpt-3.5-turbo",
+			Messages: []ChatMessage{
+				{
+					Role:    "user",
+					Content: prompt,
+				},
 			},
-		},
-	}
+		}
 
-	reqJSON, _ := json.Marshal(reqPayload)
-	reqAPI, _ := http.NewRequest("POST", openRouterURL, strings.NewReader(string(reqJSON)))
-	reqAPI.Header.Set("Content-Type", "application/json")
-	reqAPI.Header.Set("Authorization", "Bearer "+apiKey)
+		payloadBytes, _ := json.Marshal(reqPayload)
+		request, _ := http.NewRequest("POST", openRouterURL, strings.NewReader(string(payloadBytes)))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+apiKey)
 
-	client := &http.Client{}
-	resp, err := client.Do(reqAPI)
-	if err != nil {
-		http.Error(w, "API çağrısı başarısız oldu: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
+		client := &http.Client{}
+		resp, err := client.Do(request)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "API isteği başarısız", "detail": err.Error()})
+		}
+		defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "API cevabı okunamadı", http.StatusInternalServerError)
-		return
-	}
+		respBody, _ := io.ReadAll(resp.Body)
+		var openRouterResp OpenRouterResponse
+		if err := json.Unmarshal(respBody, &openRouterResp); err != nil || len(openRouterResp.Choices) == 0 {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "AI cevabı çözümlenemedi"})
+		}
 
-	var openRouterResp OpenRouterResponse
-	if err := json.Unmarshal(respBody, &openRouterResp); err != nil || len(openRouterResp.Choices) == 0 {
-		http.Error(w, "API cevabı çözümlenemedi", http.StatusInternalServerError)
-		return
-	}
+		responseContent := openRouterResp.Choices[0].Message.Content
+		fmt.Println(">> Model yanıtı:\n", responseContent)
 
-	responseContent := openRouterResp.Choices[0].Message.Content
-	fmt.Println(">> Modelden gelen yanıt:\n", responseContent)
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(responseContent), &parsed); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Geçersiz JSON üretildi"})
+		}
 
-	// Doğrudan frontend'e uygun JSON'u döndür
-	var parsedContent map[string]interface{}
-	if err := json.Unmarshal([]byte(responseContent), &parsedContent); err != nil {
-		http.Error(w, "ChatGPT çıktısı geçersiz JSON", http.StatusInternalServerError)
-		return
-	}
-
-	projects, ok := parsedContent["projects"].([]interface{})
-	if ok {
-		for _, p := range projects {
-			projMap, ok := p.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			techUsed, exists := projMap["technologiesUsed"]
-			if !exists {
-				continue
-			}
-			switch v := techUsed.(type) {
-			case string:
-				parts := strings.Split(v, ",")
-				arr := []string{}
-				for _, part := range parts {
-					trimmed := strings.TrimSpace(part)
-					if trimmed != "" {
-						arr = append(arr, trimmed)
+		if projects, ok := parsed["projects"].([]interface{}); ok {
+			for _, p := range projects {
+				if projMap, ok := p.(map[string]interface{}); ok {
+					if techUsed, exists := projMap["technologiesUsed"]; exists {
+						switch v := techUsed.(type) {
+						case string:
+							arr := []string{}
+							for _, part := range strings.Split(v, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									arr = append(arr, trimmed)
+								}
+							}
+							projMap["technologiesUsed"] = arr
+						case []interface{}:
+							// zaten array
+						}
 					}
 				}
-				projMap["technologiesUsed"] = arr
-			case []interface{}:
 			}
 		}
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(parsedContent)
-}
+		return c.JSON(parsed)
+	})
 
-func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
-
-	http.Handle("/analyze", corsMiddleware(http.HandlerFunc(analyzeHandler)))
-
-	port := "8080"
-	fmt.Println("Sunucu başlatıldı: http://localhost:" + port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	port := "8082"
+	fmt.Println("Sunucu çalışıyor: http://localhost:" + port)
+	log.Fatal(app.Listen(":" + port))
 }

@@ -1,0 +1,55 @@
+services:
+  api:
+    container_name: go_resume-ai
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      DB_HOST: db
+      DB_USER: postgres
+      DB_PASSWORD: password
+      DB_DATABASE: resume
+      DB_PORT: 5432
+    depends_on:
+      - db
+    networks:
+      - postgres_net
+  db:
+    container_name: go_resume_ai_db
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: resume
+      PGDATA: /data/postgres
+    volumes:
+      - postgres:/data/postgres
+    ports:
+      - "5432:5432"
+    networks:
+      - postgres_net
+
+  pgadmin:
+    image: dpage/pgadmin4:7.4
+    ports:
+      - 8080:80
+    environment:
+      PGADMIN_DEFAULT_EMAIL: nazararik585@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - postgres_net
+    depends_on:
+      - db
+
+networks:
+  postgres_net:
+    driver: bridge
+
+volumes:
+  pgadmin-data:
+  postgres:
+  api_volume:
